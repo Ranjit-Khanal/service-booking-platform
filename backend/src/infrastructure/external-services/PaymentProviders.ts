@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { ChargeInput, PaymentProvider, PaymentResult } from '../../domain/services/PaymentProvider.js';
 import type { FailureSimulator } from '../resilience/FailureSimulator.js';
 import type { Logger } from '../../shared/logger/logger.js';

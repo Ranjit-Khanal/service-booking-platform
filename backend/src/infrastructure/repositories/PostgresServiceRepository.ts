@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { ServiceOffering, TimeSlot } from '../../domain/entities/ServiceOffering.js';
 import {
   ServiceOffering as ServiceEntity,

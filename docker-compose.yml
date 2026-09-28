@@ -1,24 +1,69 @@
+# SlotBook — self-hosted stack.
+#
+#   cp .env.example .env     # then change the keys/passwords
+#   docker compose up --build
+#
+# Every ${VAR:-default} can be overridden in the root .env file.
+# Backend only (no demo client):  docker compose up --build haproxy worker
+
+x-backend-env: &backend-env
+  NODE_ENV: production
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DATABASE_URL: postgres://${POSTGRES_USER:-slotbook}:${POSTGRES_PASSWORD:-slotbook}@postgres:5432/${POSTGRES_DB:-slotbook}
+  REDIS_URL: redis://redis:6379
+  REDIS_KEY_PREFIX: ${REDIS_KEY_PREFIX:-slotbook:}
+  RABBITMQ_URL: amqp://${RABBITMQ_USER:-slotbook}:${RABBITMQ_PASSWORD:-slotbook}@rabbitmq:5672
+  AUTH_MODE: ${AUTH_MODE:-api_key}
+  API_KEYS: ${API_KEYS:-dev-local-key-change-me}
+  ADMIN_API_KEY: ${ADMIN_API_KEY:-}
+  TRUST_PROXY: "1"                       # exactly one proxy (HAProxy) in front of the API
+  CORS_ORIGINS: ${CORS_ORIGINS:-*}
+  RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+  RATE_LIMIT_MAX: ${RATE_LIMIT_MAX:-120}
+  PAYMENT_PROVIDER: ${PAYMENT_PROVIDER:-mock}
+  PAYMENT_TIMEOUT_MS: ${PAYMENT_TIMEOUT_MS:-3000}
+  PAYMENT_MAX_RETRIES: ${PAYMENT_MAX_RETRIES:-3}
+  IDEMPOTENCY_TTL_SECONDS: ${IDEMPOTENCY_TTL_SECONDS:-86400}
+  DB_POOL_MAX: ${DB_POOL_MAX:-10}
+
+x-api: &api
+  build:
+    context: ./backend
+  restart: unless-stopped
+  stop_grace_period: 30s                 # API drains for up to 25s on SIGTERM
+  depends_on:
+    seed:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    rabbitmq:
+      condition: service_healthy
+  expose:
+    - "3000"
+
 services:
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: slotbook
-      POSTGRES_PASSWORD: slotbook
-      POSTGRES_DB: slotbook
+      POSTGRES_USER: ${POSTGRES_USER:-slotbook}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-slotbook}
+      POSTGRES_DB: ${POSTGRES_DB:-slotbook}
     ports:
-      - "5433:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U slotbook -d slotbook"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 10
 
   redis:
     image: redis:7-alpine
+    restart: unless-stopped
     ports:
-      - "6380:6379"
+      - "127.0.0.1:${REDIS_HOST_PORT:-6380}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -27,12 +72,13 @@ services:
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
+    restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: slotbook
-      RABBITMQ_DEFAULT_PASS: slotbook
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-slotbook}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-slotbook}
     ports:
-      - "5673:5672"
-      - "15673:15672"
+      - "127.0.0.1:${RABBITMQ_HOST_PORT:-5673}:5672"
+      - "127.0.0.1:${RABBITMQ_UI_HOST_PORT:-15673}:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 10s
@@ -43,129 +89,49 @@ services:
     build:
       context: ./backend
     command: ["npx", "tsx", "src/infrastructure/database/migrate.ts"]
-    environment:
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
-      REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      NODE_ENV: production
-      PORT: "3000"
-      INSTANCE_ID: migrate
-      LOG_LEVEL: info
-      PAYMENT_PROVIDER: mock
+    environment: *backend-env
     depends_on:
       postgres:
         condition: service_healthy
 
+  # Seeds demo services/slots only when the database has no services (never wipes data).
+  # Wipe + reseed on a running stack: docker compose exec api1 npx tsx src/infrastructure/database/seed.ts --reset
   seed:
     build:
       context: ./backend
     command: ["npx", "tsx", "src/infrastructure/database/seed.ts"]
-    environment:
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
-      REDIS_URL: redis://redis:6379
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      NODE_ENV: production
-      PORT: "3000"
-      INSTANCE_ID: seed
-      LOG_LEVEL: info
-      PAYMENT_PROVIDER: mock
+    environment: *backend-env
     depends_on:
       migrate:
         condition: service_completed_successfully
 
   api1:
-    build:
-      context: ./backend
+    <<: *api
     environment:
-      NODE_ENV: production
-      PORT: "3000"
+      <<: *backend-env
       INSTANCE_ID: api-1
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
-      DB_POOL_MAX: "10"
-      REDIS_URL: redis://redis:6379
-      REDIS_KEY_PREFIX: "slotbook:"
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      RATE_LIMIT_WINDOW_MS: "60000"
-      RATE_LIMIT_MAX: "120"
-      PAYMENT_PROVIDER: mock
-      LOG_LEVEL: info
-    depends_on:
-      seed:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    expose:
-      - "3000"
 
   api2:
-    build:
-      context: ./backend
+    <<: *api
     environment:
-      NODE_ENV: production
-      PORT: "3000"
+      <<: *backend-env
       INSTANCE_ID: api-2
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
-      DB_POOL_MAX: "10"
-      REDIS_URL: redis://redis:6379
-      REDIS_KEY_PREFIX: "slotbook:"
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      RATE_LIMIT_WINDOW_MS: "60000"
-      RATE_LIMIT_MAX: "120"
-      PAYMENT_PROVIDER: mock
-      LOG_LEVEL: info
-    depends_on:
-      seed:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    expose:
-      - "3000"
 
   api3:
-    build:
-      context: ./backend
+    <<: *api
     environment:
-      NODE_ENV: production
-      PORT: "3000"
+      <<: *backend-env
       INSTANCE_ID: api-3
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
-      DB_POOL_MAX: "10"
-      REDIS_URL: redis://redis:6379
-      REDIS_KEY_PREFIX: "slotbook:"
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      RATE_LIMIT_WINDOW_MS: "60000"
-      RATE_LIMIT_MAX: "120"
-      PAYMENT_PROVIDER: mock
-      LOG_LEVEL: info
-    depends_on:
-      seed:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-      rabbitmq:
-        condition: service_healthy
-    expose:
-      - "3000"
 
   worker:
     build:
       context: ./backend
     command: ["node", "dist/worker.js"]
+    restart: unless-stopped
     environment:
-      NODE_ENV: production
-      PORT: "3000"
+      <<: *backend-env
       INSTANCE_ID: worker-1
-      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
       DB_POOL_MAX: "5"
-      REDIS_URL: redis://redis:6379
-      REDIS_KEY_PREFIX: "slotbook:"
-      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
-      PAYMENT_PROVIDER: mock
-      LOG_LEVEL: info
     depends_on:
       seed:
         condition: service_completed_successfully
@@ -174,22 +140,27 @@ services:
 
   haproxy:
     image: haproxy:2.9-alpine
+    restart: unless-stopped
     volumes:
       - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
-      - "8080:8080"
+      - "${API_HOST_PORT:-8080}:8080"
     depends_on:
       - api1
       - api2
       - api3
 
-  web:
+  # Reference client only — the backend does not depend on it.
+  demo-client:
     build:
-      context: ./frontend
+      context: ./demo-client
       args:
-        VITE_API_BASE_URL: http://localhost:8080
+        VITE_API_BASE_URL: http://localhost:${API_HOST_PORT:-8080}
+        # Demo only: these are baked into public JavaScript. See demo-client/README.md.
+        VITE_API_KEY: ${DEMO_CLIENT_API_KEY:-dev-local-key-change-me}
+        VITE_ADMIN_API_KEY: ${DEMO_CLIENT_ADMIN_API_KEY:-}
     ports:
-      - "5173:80"
+      - "${DEMO_CLIENT_HOST_PORT:-5173}:80"
     depends_on:
       - haproxy
 

@@ -1,8 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import dotenv from 'dotenv';
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 async function main(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL;
@@ -10,10 +11,24 @@ async function main(): Promise<void> {
   const client = new pg.Client({ connectionString: databaseUrl });
   await client.connect();
 
+  // Default: seed only an empty database, so `docker compose up` never wipes real data.
+  // `--reset` deletes all bookings, slots, services and processed events first.
+  const reset = process.argv.includes('--reset');
+
   try {
-    await client.query('DELETE FROM bookings');
-    await client.query('DELETE FROM time_slots');
-    await client.query('DELETE FROM services');
+    if (reset) {
+      await client.query('DELETE FROM processed_events');
+      await client.query('DELETE FROM bookings');
+      await client.query('DELETE FROM time_slots');
+      await client.query('DELETE FROM services');
+      console.log('Reset: deleted all services, slots, bookings and processed events');
+    } else {
+      const existing = await client.query<{ n: string }>('SELECT count(*) AS n FROM services');
+      if (Number(existing.rows[0]?.n ?? 0) > 0) {
+        console.log('Services already exist; skipping seed (use --reset to wipe and reseed)');
+        return;
+      }
+    }
 
     const services = [
       {

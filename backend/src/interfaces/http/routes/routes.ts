@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { Router } from 'express';
 import type {
   AdminController,
@@ -5,14 +6,12 @@ import type {
   CatalogController,
 } from '../controllers/controllers.js';
 
+/** Public integration API (behind API-key auth). */
 export function buildRoutes(deps: {
   bookings: BookingController;
   catalog: CatalogController;
-  admin: AdminController;
 }): Router {
   const router = Router();
-
-  router.get('/health', deps.admin.health);
 
   router.get('/services', deps.catalog.services);
   router.get('/services/:id', deps.catalog.service);
@@ -21,10 +20,18 @@ export function buildRoutes(deps: {
   router.post('/bookings', deps.bookings.create);
   router.get('/bookings/:id', deps.catalog.booking);
   router.get('/bookings', deps.catalog.bookingsByEmail);
+  router.post('/bookings/:id/cancel', deps.bookings.cancel);
 
-  router.get('/admin/failures', deps.admin.getFailures);
-  router.post('/admin/failures', deps.admin.setFailures);
-  router.post('/admin/cache/flush', deps.admin.flushCache);
+  return router;
+}
+
+/** Operator-only routes (behind ADMIN_API_KEY; disabled when unset). */
+export function buildAdminRoutes(admin: AdminController): Router {
+  const router = Router();
+
+  router.get('/failures', admin.getFailures);
+  router.post('/failures', admin.setFailures);
+  router.post('/cache/flush', admin.flushCache);
 
   return router;
 }

@@ -1,294 +1,207 @@
 # SlotBook
 
-Production-style **service booking** platform (Node.js + TypeScript) built to apply concepts from *Distributed Systems with Node.js* (Thomas Hunter II)—not to copy its recipe-API samples.
+## What is this?
 
-Deep book analysis: [`docs/BOOK_KNOWLEDGE_MAP.md`](docs/BOOK_KNOWLEDGE_MAP.md)  
-Architecture decisions: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+A self-hostable service-booking backend, built with Node.js and TypeScript on PostgreSQL,
+Redis and RabbitMQ. It is meant to be two things at once:
 
----
+- **Usable infrastructure:** a booking API you can run with `docker compose up` and
+  integrate into your own application.
+- **A learning and reference implementation** of backend and distributed-systems
+  engineering. The docs explain *why* each mechanism exists and *what happens when things
+  fail*, including where the current implementation falls short.
 
-## Why service booking?
+This repository is the **community edition**, licensed under GNU AGPLv3. There is no other
+edition and no feature is held back (see [docs/licensing.md](docs/licensing.md)).
 
-| Concern | How booking surfaces it |
-|---------|-------------------------|
-| Concurrency | Two clients, one last slot |
-| Idempotency | Payment retries must not double-book |
-| Async | Email after confirm |
-| Redis | Shared rate limits + idempotency across API replicas |
-| Horizontal scale | 3 APIs behind HAProxy |
-| Resilience | Payment timeouts, circuit breaker, failure toggles |
+## Who is it for?
 
----
+- Developers learning backend engineering
+- Developers learning distributed systems
+- People experimenting with Node.js infrastructure
+- Developers building service-booking applications
+- Developers who want a self-hosted booking backend
 
-## Stack
+## What can I do with it?
 
-- **API / Worker:** Node 22, Express, TypeScript (strict)
-- **Postgres:** system of record (slots, bookings)
-- **Redis:** distributed rate limit + idempotency + short cache (Ch9 atomics)
-- **RabbitMQ:** `booking.created` → notification worker (+ DLQ)
-- **HAProxy:** load balance + health checks + maxconn back pressure (Ch3)
-- **Frontend:** React + Vite (SlotBook UI)
+- **Run it locally**: one command, three API replicas behind a load balancer ([quick start](#quick-start)).
+- **Study the architecture**: [architecture overview](docs/architecture/overview.md), [ADRs](docs/architecture/decisions/README.md).
+- **Experiment with failure scenarios**: kill Redis, restart the broker, inject payment
+  timeouts, and watch what happens ([failure scenarios](docs/distributed-systems/failure-scenarios.md), [failure injection](docs/operations/failure-injection.md)).
+- **Build a frontend against the API**: [integration guide](docs/api/overview.md), [OpenAPI spec](docs/api/openapi.yaml).
+- **Self-host it**: [self-hosting guide](docs/deployment/self-hosting.md).
+- **Integrate it into another application**: API keys, idempotent booking creation, `booking.created` events.
+- **Contribute improvements**: [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
+```text
+┌──────────────┐     HTTP + API key     ┌─────────┐     ┌──────────────────────┐
+│ Your app /   │ ─────────────────────▶ │ HAProxy │ ──▶ │ API ×3 (stateless)   │──┐
+│ demo client  │                        └─────────┘     └──────────────────────┘  │
+└──────────────┘                                          │        │        │     │
+                                                    PostgreSQL   Redis   RabbitMQ │
+                                                  (source of   (idempo-     │     │
+                                                    truth)      tency,      ▼     │
+                                                                rate limit, Worker│
+                                                                cache)  (notifications)
+```
 
-## Quick start (Docker)
+## What's in the box
+
+### Core service (`backend/`)
+
+What an integrating application gets:
+
+- **Catalog reads**: services and open time slots per day (cached, shared across instances).
+- **Booking creation**: claims a slot, charges via a pluggable payment provider, and
+  confirms, all synchronously. Double booking is prevented by Postgres row locks, and
+  retries are handled with `Idempotency-Key`.
+- **Cancellation**: `POST /api/bookings/{id}/cancel`, which reopens the slot atomically and
+  is safe to retry.
+- **Booking lookup** by ID or customer email.
+- **Events**: `booking.created` on a RabbitMQ topic exchange, with a bundled notification
+  worker (dedupe, retries, dead-letter queue).
+- **API-key authentication** for client applications; a separate, off-by-default admin key.
+- **Operations**: `/api/health` for load balancers, structured JSON logs with correlation
+  IDs, graceful shutdown, and restart on broker loss.
+
+API contract: [docs/api/overview.md](docs/api/overview.md) ·
+[docs/api/openapi.yaml](docs/api/openapi.yaml)
+
+### Demo client (`demo-client/`)
+
+A React app that consumes the API. **It is a reference client, not the core product.** The
+backend has no dependency on it. See [demo-client/README.md](demo-client/README.md).
+
+### Engineering concepts demonstrated
+
+| Concept | Where | Doc |
+|---|---|---|
+| Row-level locking (`SELECT … FOR UPDATE`) against double booking | `PostgresServiceRepository.claimSlot` | [concurrency](docs/distributed-systems/concurrency.md), [locking](docs/distributed-systems/database-locking.md) |
+| Short transactions + compensation around a remote call | `CreateBookingUseCase` | [transactions](docs/distributed-systems/transactions.md) |
+| Idempotency keys (Redis `SET NX` + DB unique index) | booking creation | [idempotency](docs/distributed-systems/idempotency.md) |
+| Idempotent consumer (dedupe table) | notification worker | [idempotency](docs/distributed-systems/idempotency.md#2-notification-consumer) |
+| Timeouts, retries with backoff + jitter, circuit breaker | payment path | [retries](docs/distributed-systems/retries.md) |
+| Shared state across replicas (rate limit, cache, idempotency) | Redis | [redis](docs/distributed-systems/redis.md), [caching](docs/distributed-systems/caching.md) |
+| At-least-once messaging, retries, DLQ | RabbitMQ + worker | [messaging](docs/distributed-systems/messaging.md) |
+| Load balancing and health checks | HAProxy | [overview](docs/architecture/overview.md) |
+| Graceful shutdown | API + worker | [graceful-shutdown](docs/distributed-systems/graceful-shutdown.md) |
+| Failure injection | admin API | [failure-injection](docs/operations/failure-injection.md) |
+
+What it does **not** do (yet): real payment or email providers, customer accounts,
+provider/staff assignment, a catalog management API, rescheduling, refunds, or expiry of
+abandoned bookings. The full list, including known correctness gaps, is in
+[docs/architecture/known-limitations.md](docs/architecture/known-limitations.md).
+
+## Quick start
 
 ```bash
+git clone <repository-url> slotbook && cd slotbook
+cp .env.example .env
 docker compose up --build
 ```
 
-| Surface | URL |
-|---------|-----|
-| UI | http://localhost:5173 |
-| API via LB | http://localhost:8080/api/health |
-| RabbitMQ UI | http://localhost:15673 (slotbook/slotbook) |
-| Postgres (host) | localhost:5433 |
-| Redis (host) | localhost:6380 |
-
-> Host ports for Postgres/Redis/Rabbit are remapped (5433/6380/5673) to avoid clashing with local installs. Inside the Compose network, services still use the standard ports.
-
-
-Compose brings up: postgres, redis, rabbitmq, migrate, seed, **api1/api2/api3**, worker, haproxy, web.
-
-### What scales horizontally
-
-- **api\*** — stateless request handlers (book Ch3)
-- **worker** — scale consumers for notification lag
-- **Not** Postgres/Redis/Rabbit primary nodes in this demo (would need HA setups)
-
-### If api-2 crashes
-
-HAProxy health check fails → traffic goes to api1/api3. Retriable client requests with the same `Idempotency-Key` are safe.
-
----
-
-## Local API development
+| URL | |
+|---|---|
+| http://localhost:8080/api/health | API via HAProxy (no auth) |
+| http://localhost:5173 | Demo client |
+| http://localhost:15673 | RabbitMQ management UI (local only; credentials from `.env`) |
 
 ```bash
-# infra only
+KEY=dev-local-key-change-me   # from API_KEYS in .env
+curl -H "Authorization: Bearer $KEY" http://localhost:8080/api/services
+```
+
+Backend only: `docker compose up --build haproxy worker`. Details, database reset and
+production notes: [docs/deployment/self-hosting.md](docs/deployment/self-hosting.md).
+
+## Booking flow
+
+```text
+POST /api/bookings  (Idempotency-Key)
+  rate limit (Redis) → idempotency SET NX (Redis)
+  → BEGIN; SELECT slot FOR UPDATE; UPDATE slot booked; COMMIT     (Postgres)
+  → INSERT booking pending_payment
+  → charge (timeout 3s × ≤3 attempts, circuit breaker)
+  → UPDATE booking confirmed → publish booking.created → mark key completed
+  ← 201
+worker: booking.created → dedupe (processed_events) → send confirmation → ack
+```
+
+```text
+pending_payment ──▶ confirmed ──cancel──▶ cancelled
+        └─────────▶ failed   (slot released)
+```
+
+More: [request flow](docs/architecture/request-flow.md) ·
+[booking lifecycle](docs/architecture/booking-lifecycle.md) ·
+[failure scenarios](docs/distributed-systems/failure-scenarios.md)
+
+## Technologies
+
+Node.js ≥ 20 (Docker images use 22), TypeScript (strict), Express 5, `pg`, `ioredis`,
+`amqplib`, Zod, pino, Vitest · PostgreSQL 16 · Redis 7 · RabbitMQ 3.13 · HAProxy 2.9 ·
+React 19 + Vite (demo).
+
+## Local development
+
+```bash
 docker compose up -d postgres redis rabbitmq
-
-cp backend/.env.example backend/.env
-cd backend
-npm install
+cd backend && cp .env.example .env && npm install
 npm run migrate && npm run seed
-npm run dev          # API :3000
-npm run dev:worker   # notifications
+npm run dev            # API on :3000
+npm run dev:worker     # worker
 ```
 
-Frontend:
+See [docs/operations/local-development.md](docs/operations/local-development.md).
 
-```bash
-cd frontend
-npm install
-VITE_API_BASE_URL=http://localhost:3000 npm run dev
-```
+## Configuration
 
----
-
-## Environment variables
-
-See `backend/.env.example`. Validated at boot with Zod (`src/config/env.ts`).
-
-Critical:
-
-| Var | Role |
-|-----|------|
-| `DATABASE_URL` | Postgres |
-| `REDIS_URL` | Rate limit / idempotency / cache |
-| `RABBITMQ_URL` | Events |
-| `PAYMENT_*` | Timeout + retries |
-| `FAIL_*` | Boot-time failure flags (also runtime via admin API) |
-
----
-
-## API (selected)
-
-| Method | Path | Notes |
-|--------|------|-------|
-| GET | `/api/health` | LB health; DB+Redis checks |
-| GET | `/api/services` | Catalog (cached ~30s) |
-| GET | `/api/services/:id/slots?date=YYYY-MM-DD` | Open slots |
-| POST | `/api/bookings` | Requires `Idempotency-Key` |
-| GET | `/api/bookings/:id` | Booking detail |
-| GET | `/api/bookings?email=` | Customer history |
-| POST | `/api/admin/failures` | Failure simulation |
-
-### Idempotent booking
-
-```http
-POST /api/bookings
-Idempotency-Key: abc-123
-Content-Type: application/json
-
-{
-  "serviceId": "...",
-  "slotId": "...",
-  "customerName": "Ada Lovelace",
-  "customerEmail": "ada@example.com"
-}
-```
-
-Replay with same key + same body → `200` + prior booking (`replayed: true`).
-
----
-
-## Teaching walkthrough (major decisions)
-
-### Problem: last slot double-booking
-
-**Naive:** `SELECT status` then `UPDATE` in app code.  
-**Fails:** two requests both see `open`.  
-**Pattern:** transaction + `SELECT … FOR UPDATE` (+ unique partial index).  
-**Where:** `PostgresServiceRepository.claimSlot`.  
-**Multi-instance:** lock is in Postgres — works across api1/2/3.
-
-### Problem: payment timeout → client retries → double charge
-
-**Naive:** always create a new booking on POST.  
-**Fails:** ambiguous network failure.  
-**Pattern:** Idempotency-Key (book Ch8 / Stripe pattern).  
-**Where:** Redis `IdempotencyStore` + use case.  
-**Multi-instance:** Redis is shared; any API replica sees the key.
-
-### Problem: email coupling slows booking
-
-**Naive:** send email inside HTTP request.  
-**Fails:** SMTP latency/outage fails the booking.  
-**Pattern:** publish event; worker consumes.  
-**Where:** RabbitMQ + `worker.ts`.  
-**Duplicates:** at-least-once → `processed_events` idempotent consumer.
-
-### Problem: payment dependency melts down
-
-**Naive:** retry forever immediately.  
-**Fails:** thundering herd; book warns about infinite retries.  
-**Pattern:** exponential backoff + max attempts + circuit breaker (Ch8).  
-**Where:** `withRetry`, `CircuitBreaker`.
-
-### Problem: one Node process / one instance dies
-
-**Naive:** single process.  
-**Fails:** event loop / host limits (Ch1/Ch3).  
-**Pattern:** HAProxy + N replicas + health checks.  
-**Where:** `docker-compose.yml` + `haproxy.cfg`.
-
-### Problem: Redis vs Postgres roles
-
-Redis is **not** the booking source of truth. It solves **shared ephemeral coordination** (Ch9). Postgres owns bookings/slots.
-
----
-
-## Caching
-
-Redis **cache-aside** for services/slots. See [`docs/CACHE_STRATEGY.md`](docs/CACHE_STRATEGY.md).
-
-```bash
-# metrics appear under "cache"
-curl -s http://localhost:8080/api/health | jq .cache
-
-# flush catalog cache on all instances (shared Redis)
-curl -s -X POST http://localhost:8080/api/admin/cache/flush
-```
-
-
-UI: **Ops** page, or:
-
-```bash
-curl -X POST http://localhost:8080/api/admin/failures \
-  -H 'content-type: application/json' \
-  -d '{"failPayment":true}'
-```
-
-| Flag | Effect |
-|------|--------|
-| `failPayment` | Payment returns retryable failure |
-| `failRedis` | Redis ops throw → 503 |
-| `failDatabase` | DB ops throw → 503 |
-| `failBrokerPublish` | Event publish fails after payment |
-| `paymentLatencyMs` | Artificial delay (timeout demos) |
-
-Recovery: set flags back to `false`; circuit breaker half-opens after reset timeout.
-
----
+Environment variables, validated at startup (the process exits with a readable list of
+problems). The root [`.env.example`](.env.example) is for Docker Compose, and
+[`backend/.env.example`](backend/.env.example) is for running on the host. Reference:
+[docs/operations/configuration.md](docs/operations/configuration.md).
 
 ## Testing
 
 ```bash
 cd backend
-npm run test:unit
-
-# needs running Postgres + migrated schema
-RUN_INTEGRATION=1 npm run test:concurrency
+npm run typecheck
+npm run test:unit                                   # no infrastructure needed
+RUN_INTEGRATION=1 npm run test:concurrency          # needs a migrated Postgres (DATABASE_URL)
 ```
 
-| Level | Protects against |
-|-------|------------------|
-| Unit | Domain rules, retry/circuit logic |
-| Concurrency | Double-claim race |
-| Integration/API | (extend with Testcontainers as needed) |
+Unit tests cover state transitions, retry/circuit breaker, idempotent replay, auth and
+config validation. Concurrency tests run real concurrent slot claims and cancels against
+Postgres.
 
----
+## Documentation
 
-## Pattern map
+| | |
+|---|---|
+| Architecture | [overview](docs/architecture/overview.md) · [request flow](docs/architecture/request-flow.md) · [booking lifecycle](docs/architecture/booking-lifecycle.md) · [known limitations](docs/architecture/known-limitations.md) · [ADRs](docs/architecture/decisions/README.md) |
+| API | [integration guide](docs/api/overview.md) · [OpenAPI](docs/api/openapi.yaml) |
+| Distributed systems | [concurrency](docs/distributed-systems/concurrency.md) · [locking](docs/distributed-systems/database-locking.md) · [transactions](docs/distributed-systems/transactions.md) · [idempotency](docs/distributed-systems/idempotency.md) · [redis](docs/distributed-systems/redis.md) · [caching](docs/distributed-systems/caching.md) · [messaging](docs/distributed-systems/messaging.md) · [retries](docs/distributed-systems/retries.md) · [graceful shutdown](docs/distributed-systems/graceful-shutdown.md) · [failure scenarios](docs/distributed-systems/failure-scenarios.md) |
+| Database | [schema](docs/database/schema.md) |
+| Operations | [self-hosting](docs/deployment/self-hosting.md) · [local development](docs/operations/local-development.md) · [docker](docs/operations/docker.md) · [configuration](docs/operations/configuration.md) · [failure injection](docs/operations/failure-injection.md) |
+| Security & licensing | [security](docs/security.md) · [SECURITY.md](SECURITY.md) (reporting) · [licensing](docs/licensing.md) |
+| Background | [book knowledge map](docs/BOOK_KNOWLEDGE_MAP.md): concepts from *Distributed Systems with Node.js* (T. Hunter II) mapped to this code |
 
-| Pattern | Where Used | Problem Solved |
-|---------|------------|----------------|
-| Repository | `domain/repositories` + Postgres impl | Hide SQL; test use cases |
-| Manual DI | `composition/buildApp.ts` | Explicit dependency direction |
-| Strategy/Adapter | `PaymentProvider` | Swap gateways |
-| Factory | `createPaymentProvider` | Select adapter from config |
-| Circuit Breaker | payment path | Stop calling dead dependency |
-| Retry + backoff | payment, Redis reconnect | Transient faults without stampede |
-| Idempotency | booking POST | Safe client retries |
-| Event / queue | RabbitMQ + worker | Async side effects |
-| Rate limit | Redis INCR middleware | Shared admission control |
-| Row lock | `claimSlot` | Lost-update / double book |
+## Contributing
 
----
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Book → code mapping
+## License
 
-| Book Concept | Location in book | Project implementation |
-|--------------|------------------|------------------------|
-| Why distribute / event loop | Ch1 | Multiple API containers; non-blocking handlers |
-| HAProxy LB + health checks | Ch3 “Load Balancing and Health Checks” | `docker/haproxy/haproxy.cfg`, `/api/health` |
-| Rate limiting & back pressure | Ch3 “Rate Limiting and Back Pressure” | HAProxy `maxconn` + Redis rate limiter |
-| Structured logging / tracing idea | Ch4 | pino + `x-request-id` / `x-correlation-id` |
-| Health checks | Ch4 | `/api/health` |
-| Docker + Compose | Ch5 | `Dockerfile`s, `docker-compose.yml` |
-| Unit vs integration tests | Ch6 | `tests/unit`, `tests/concurrency` |
-| SIGTERM graceful shutdown | Ch8 | `shared/shutdown.ts` |
-| Connection pooling | Ch8 | `infrastructure/database/pool.ts` |
-| Idempotency-Key | Ch8 | Redis store + `CreateBookingUseCase` |
-| HTTP retry / method matrix | Ch8 | Payment retries only when retryable |
-| Circuit breaker | Ch8 | `CircuitBreaker` |
-| Exponential backoff | Ch8 | `withRetry`, ioredis `retryStrategy` |
-| Resilience testing | Ch8 | `FailureSimulator` + admin API |
-| Redis INCR atomics | Ch9 | Distributed rate limiter |
-| Redis SET NX / atomicity | Ch9 | Idempotency `begin` |
-| RabbitMQ / DLQ | Not verified as primary book topic | Industry addition for async notify |
-| Layered OOP / DIP | Not verified as primary book topic | Industry architecture layering |
+The SlotBook community edition is licensed under the
+**GNU Affero General Public License v3.0** (`AGPL-3.0-only`). See [LICENSE](LICENSE) for the
+full text.
 
----
+The AGPL is a free-software license. It allows you to use, study, modify, redistribute and
+self-host this software, including as a network service, under the conditions set out in
+the license. One of those conditions (section 13) concerns offering the source code of a
+modified version to users who interact with it over a network. Read the license for the
+exact terms; this paragraph is not a substitute for it.
 
-## TypeScript interfaces note
-
-Interfaces like `PaymentProvider` exist **only at compile time**. After emission to JS they disappear. Runtime polymorphism is “duck typing” via the object you injected. That is why DI + coding to the interface still works without Java-style runtime interface objects.
-
----
-
-## Project layout
-
-```text
-backend/src/
-  domain/           entities, ports
-  application/      use cases
-  infrastructure/   postgres, redis, rabbit, payments, resilience
-  interfaces/       http + (worker uses messaging)
-  composition/      manual DI
-  main.ts / worker.ts
-frontend/           React UI
-docker/haproxy/     LB config
-docs/               book knowledge map
-```
+Dependencies and container images keep their own licenses. Details, the contribution
+terms and how the project could add separately licensed modules in the future are in
+[docs/licensing.md](docs/licensing.md).

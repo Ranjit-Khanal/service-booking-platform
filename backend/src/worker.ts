@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { loadEnv } from './config/env.js';
 import { createLogger } from './shared/logger/logger.js';
 import { FailureSimulator } from './infrastructure/resilience/FailureSimulator.js';
@@ -25,7 +26,9 @@ async function main(): Promise<void> {
   });
 
   const db = createDatabase(env, logger, failures);
-  const messaging = await createMessaging(env, logger, failures);
+  const messaging = await createMessaging(env, logger, failures, () => {
+    process.kill(process.pid, 'SIGTERM');
+  });
   const notifications = new LoggingNotificationSender(db, logger);
   const consumer = new BookingCreatedConsumer(notifications, logger);
 
@@ -38,12 +41,22 @@ async function main(): Promise<void> {
 
   logger.info({ queue: env.NOTIFICATION_QUEUE }, 'Notification worker started');
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     logger.info({ signal }, 'Worker shutting down');
-    await stop();
-    await messaging.close();
-    await db.close();
-    process.exit(0);
+    const force = setTimeout(() => process.exit(1), 10_000);
+    force.unref();
+    try {
+      await stop().catch(() => undefined); // channel may already be gone
+      await messaging.close();
+      await db.close();
+      process.exit(0);
+    } catch (err) {
+      logger.error({ err }, 'Error during worker shutdown');
+      process.exit(1);
+    }
   };
 
   process.on('SIGTERM', () => void shutdown('SIGTERM'));

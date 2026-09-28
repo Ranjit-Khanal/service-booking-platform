@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 /**
  * Explicit cache key + TTL policy for SlotBook.
  *

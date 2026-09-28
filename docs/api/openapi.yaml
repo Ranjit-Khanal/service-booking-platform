@@ -1,0 +1,493 @@
+openapi: 3.1.0
+info:
+  title: SlotBook API
+  version: 1.0.0
+  license:
+    name: AGPL-3.0-only
+    identifier: AGPL-3.0-only
+  description: |
+    Self-hostable service-booking backend. Integrating applications authenticate with an
+    API key and act on behalf of their own end users. See docs/api/overview.md for the
+    integration guide, idempotency rules and the booking state machine.
+servers:
+  - url: http://localhost:8080
+    description: Local Docker Compose (HAProxy)
+security:
+  - bearerApiKey: []
+  - headerApiKey: []
+
+tags:
+  - name: Catalog
+  - name: Bookings
+  - name: Operations
+
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Liveness/readiness for load balancers
+      description: No authentication and no rate limiting. 503 when Postgres or Redis is unreachable.
+      security: []
+      responses:
+        '200':
+          description: Healthy
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+        '503':
+          description: Degraded (same body, status "degraded")
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Health' }
+
+  /api/services:
+    get:
+      operationId: listServices
+      tags: [Catalog]
+      summary: List active services
+      description: Served from a shared cache (up to 60s stale). Not paginated.
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Service' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/services/{id}:
+    get:
+      operationId: getService
+      tags: [Catalog]
+      summary: Get one service
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Service' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/services/{id}/slots:
+    get:
+      operationId: listOpenSlots
+      tags: [Catalog]
+      summary: List open slots for one UTC day
+      description: |
+        Advisory: may be up to ~8s stale. A slot shown here can still be taken; booking it
+        then returns 409 SLOT_UNAVAILABLE. Not paginated (one day per request).
+      parameters:
+        - $ref: '#/components/parameters/Id'
+        - name: date
+          in: query
+          required: false
+          description: UTC date, defaults to today (UTC).
+          schema: { type: string, format: date, example: '2026-10-01' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Slot' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/bookings:
+    post:
+      operationId: createBooking
+      tags: [Bookings]
+      summary: Create a booking (claim slot, charge, confirm)
+      description: |
+        Synchronous: on 201 the slot is reserved, the payment succeeded and the booking is
+        `confirmed`. A `booking.created` event is then delivered asynchronously.
+
+        Idempotency: the `Idempotency-Key` header is required. Repeating a completed request
+        with the same key and body returns 200 with `replayed: true`. A key whose first
+        attempt is still running — or FAILED — returns 409 until the key expires (24h by
+        default): use a new key after a failure.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: { type: string, maxLength: 255 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreateBookingRequest' }
+      responses:
+        '201':
+          description: Booking confirmed
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateBookingResponse' }
+        '200':
+          description: 'Idempotent replay of a completed request (replayed = true)'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreateBookingResponse' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '402':
+          description: Payment declined (booking recorded as `failed`, slot released)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: |
+            `SLOT_UNAVAILABLE` — slot taken or changed since it was listed.
+            `CONFLICT` — same Idempotency-Key in progress / previously failed, or reused with a
+            different body (`details.code = IDEMPOTENCY_CONFLICT`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+        '500':
+          description: |
+            Unexpected error, including payment timeout, open payment circuit, and real
+            Postgres/Redis outages. The booking may or may not exist — look it up before
+            retrying with a new key.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '503':
+          description: |
+            A dependency was unavailable. If this happens after payment (broker publish),
+            the booking IS confirmed — look it up before retrying.
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+    get:
+      operationId: listBookingsByEmail
+      tags: [Bookings]
+      summary: List bookings for a customer email
+      description: Newest first. Not paginated.
+      parameters:
+        - name: email
+          in: query
+          required: true
+          schema: { type: string, format: email }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/BookingSummary' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /api/bookings/{id}:
+    get:
+      operationId: getBooking
+      tags: [Bookings]
+      summary: Get a booking
+      description: Always read from Postgres (never cached).
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Booking' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/bookings/{id}/cancel:
+    post:
+      operationId: cancelBooking
+      tags: [Bookings]
+      summary: Cancel a confirmed booking
+      description: |
+        Transition `confirmed → cancelled` and return the slot to inventory, atomically.
+        Safe to retry without an Idempotency-Key: cancelling an already-cancelled booking
+        returns 200 with `changed: false`. Does NOT refund — use `paymentReference` with your
+        payment provider.
+      parameters:
+        - $ref: '#/components/parameters/Id'
+      responses:
+        '200':
+          description: Cancelled (or already cancelled)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [data]
+                properties:
+                  data:
+                    allOf:
+                      - $ref: '#/components/schemas/BookingSummary'
+                      - type: object
+                        required: [changed]
+                        properties:
+                          paymentReference: { type: [string, 'null'] }
+                          changed:
+                            type: boolean
+                            description: false when the booking was already cancelled
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409':
+          description: '`INVALID_STATE_TRANSITION` — booking is `pending_payment` or `failed`.'
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+
+  /api/admin/failures:
+    get:
+      operationId: getFailureFlags
+      tags: [Operations]
+      summary: Read failure-injection flags (this replica only)
+      security: [{ adminKey: [] }]
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/FailureFlags' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Admin routes disabled (ADMIN_API_KEY unset) }
+    post:
+      operationId: setFailureFlags
+      tags: [Operations]
+      summary: Replace failure-injection flags (this replica only; omitted flags reset)
+      security: [{ adminKey: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FailureFlags' }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data: { $ref: '#/components/schemas/FailureFlags' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Admin routes disabled }
+
+  /api/admin/cache/flush:
+    post:
+      operationId: flushCatalogCache
+      tags: [Operations]
+      summary: Delete all catalog cache entries (shared by all replicas)
+      security: [{ adminKey: [] }]
+      responses:
+        '200': { description: Flushed }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { description: Admin routes disabled }
+
+components:
+  securitySchemes:
+    bearerApiKey:
+      type: http
+      scheme: bearer
+      description: One of the keys in API_KEYS.
+    headerApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+    adminKey:
+      type: apiKey
+      in: header
+      name: X-Admin-Key
+      description: ADMIN_API_KEY. Admin routes return 404 when it is not configured.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      description: UUID. Non-UUID values return 404.
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid API key
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    NotFound:
+      description: Resource (or route) not found
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationError:
+      description: Invalid input
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    RateLimited:
+      description: Too many requests from this client IP in the current window
+      headers:
+        X-RateLimit-Limit: { schema: { type: integer } }
+        X-RateLimit-Remaining: { schema: { type: integer } }
+        X-RateLimit-Reset: { description: Milliseconds until the window resets, schema: { type: integer } }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - VALIDATION_ERROR
+                - NOT_FOUND
+                - UNAUTHORIZED
+                - INVALID_STATE_TRANSITION
+                - CONFLICT
+                - SLOT_UNAVAILABLE
+                - RATE_LIMITED
+                - PAYMENT_FAILED
+                - SERVICE_UNAVAILABLE
+                - INTERNAL_ERROR
+            message: { type: string }
+            details: {}
+            correlationId: { type: string }
+            retryable: { type: boolean }
+
+    Service:
+      type: object
+      required: [id, name, description, durationMinutes, priceCents, currency]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        description: { type: string }
+        durationMinutes: { type: integer }
+        priceCents: { type: integer, description: Integer minor units }
+        currency: { type: string, example: USD }
+
+    Slot:
+      type: object
+      required: [id, serviceId, startsAt, endsAt, status, version]
+      properties:
+        id: { type: string, format: uuid }
+        serviceId: { type: string, format: uuid }
+        startsAt: { type: string, format: date-time }
+        endsAt: { type: string, format: date-time }
+        status: { type: string, enum: [open] }
+        version: { type: integer }
+
+    BookingStatus:
+      type: string
+      enum: [pending_payment, confirmed, cancelled, failed]
+
+    CreateBookingRequest:
+      type: object
+      required: [serviceId, slotId, customerName, customerEmail]
+      properties:
+        serviceId: { type: string, format: uuid }
+        slotId: { type: string, format: uuid }
+        customerName: { type: string, minLength: 1, maxLength: 200 }
+        customerEmail: { type: string, format: email, maxLength: 320 }
+
+    CreateBookingResponse:
+      type: object
+      required: [data]
+      properties:
+        data:
+          type: object
+          required: [id, status, serviceId, slotId, customerEmail, amountCents, currency, replayed]
+          properties:
+            id: { type: string, format: uuid }
+            status: { $ref: '#/components/schemas/BookingStatus' }
+            serviceId: { type: string, format: uuid }
+            slotId: { type: string, format: uuid }
+            customerEmail: { type: string }
+            amountCents: { type: integer }
+            currency: { type: string }
+            paymentReference: { type: [string, 'null'] }
+            replayed: { type: boolean }
+
+    BookingSummary:
+      type: object
+      required: [id, status, serviceId, slotId, amountCents, currency]
+      properties:
+        id: { type: string, format: uuid }
+        status: { $ref: '#/components/schemas/BookingStatus' }
+        serviceId: { type: string, format: uuid }
+        slotId: { type: string, format: uuid }
+        amountCents: { type: integer }
+        currency: { type: string }
+        createdAt: { type: string, format: date-time }
+
+    Booking:
+      allOf:
+        - $ref: '#/components/schemas/BookingSummary'
+        - type: object
+          required: [customerName, customerEmail, createdAt]
+          properties:
+            customerName: { type: string }
+            customerEmail: { type: string }
+            paymentReference: { type: [string, 'null'] }
+
+    FailureFlags:
+      type: object
+      properties:
+        failPayment: { type: boolean }
+        failRedis: { type: boolean }
+        failDatabase: { type: boolean }
+        failBrokerPublish: { type: boolean }
+        paymentLatencyMs: { type: integer, minimum: 0 }
+
+    Health:
+      type: object
+      properties:
+        status: { type: string, enum: [ok, degraded] }
+        instanceId: { type: string }
+        checks:
+          type: object
+          properties:
+            database: { type: boolean }
+            redis: { type: boolean }
+        circuitBreaker: { type: string, enum: [closed, open, half_open] }
+        failures: { $ref: '#/components/schemas/FailureFlags' }
+        cache:
+          type: object
+          properties:
+            hits: { type: integer }
+            misses: { type: integer }
+            bypasses: { type: integer }
+            invalidations: { type: integer }

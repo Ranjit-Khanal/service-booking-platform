@@ -1,5 +1,8 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Request, Response, NextFunction } from 'express';
 import type { CreateBookingUseCase } from '../../../application/use-cases/CreateBookingUseCase.js';
+import type { CancelBookingUseCase } from '../../../application/use-cases/CancelBookingUseCase.js';
+import { NotFoundError } from '../../../shared/errors/AppError.js';
 import type {
   GetBookingUseCase,
   GetServiceUseCase,
@@ -16,8 +19,45 @@ import type { Redis as RedisClient } from 'ioredis';
 import type { CatalogCache } from '../../../application/services/CatalogCache.js';
 import { CacheTtl } from '../../../infrastructure/cache/CachePolicy.js';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Path IDs are UUIDs; anything else cannot exist, so answer 404 instead of a Postgres cast error. */
+function uuidParam(req: Request, name: string, what: string): string {
+  const value = String(req.params[name] ?? '');
+  if (!UUID_RE.test(value)) throw new NotFoundError(`${what} not found`);
+  return value;
+}
+
 export class BookingController {
-  constructor(private readonly createBooking: CreateBookingUseCase) {}
+  constructor(
+    private readonly createBooking: CreateBookingUseCase,
+    private readonly cancelBooking: CancelBookingUseCase,
+  ) {}
+
+  cancel = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    try {
+      const r = req as AuthedRequest;
+      const result = await this.cancelBooking.execute({
+        bookingId: uuidParam(req, 'id', 'Booking'),
+        correlationId: r.correlationId,
+      });
+      const b = result.booking;
+      res.status(200).json({
+        data: {
+          id: b.id,
+          status: b.status,
+          serviceId: b.serviceId,
+          slotId: b.slotId,
+          amountCents: b.amountCents,
+          currency: b.currency,
+          paymentReference: b.paymentReference,
+          changed: result.changed,
+        },
+      });
+    } catch (error) {
+      next(error);
+    }
+  };
 
   create = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
@@ -83,7 +123,7 @@ export class CatalogController {
 
   service = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const service = await this.getService.execute(String(req.params.id));
+      const service = await this.getService.execute(uuidParam(req, 'id', 'Service'));
       res.setHeader('Cache-Control', `public, max-age=30`);
       res.json({
         data: {
@@ -103,7 +143,7 @@ export class CatalogController {
   slots = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const date = String(req.query.date ?? new Date().toISOString().slice(0, 10));
-      const slots = await this.listSlots.execute(String(req.params.id), date);
+      const slots = await this.listSlots.execute(uuidParam(req, 'id', 'Service'), date);
       // Slots must not be cached long at the HTTP edge — inventory mutates.
       res.setHeader('Cache-Control', 'private, max-age=0, must-revalidate');
       res.json({
@@ -123,7 +163,7 @@ export class CatalogController {
 
   booking = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const booking = await this.getBooking.execute(String(req.params.id));
+      const booking = await this.getBooking.execute(uuidParam(req, 'id', 'Booking'));
       res.json({
         data: {
           id: booking.id,

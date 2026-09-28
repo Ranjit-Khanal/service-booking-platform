@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, it, vi } from 'vitest';
 import { CreateBookingUseCase } from '../../src/application/use-cases/CreateBookingUseCase.js';
 import { Booking } from '../../src/domain/entities/Booking.js';
@@ -7,15 +8,15 @@ import pino from 'pino';
 
 function makeUseCase(overrides: Record<string, unknown> = {}) {
   const slot = TimeSlot.rehydrate({
-    id: 'slot-1',
-    serviceId: 'svc-1',
+    id: '00000000-0000-4000-8000-000000000002',
+    serviceId: '00000000-0000-4000-8000-000000000001',
     startsAt: new Date('2030-01-01T10:00:00Z'),
     endsAt: new Date('2030-01-01T11:00:00Z'),
     status: 'open',
     version: 1,
   });
 
-  const service = new ServiceOffering('svc-1', 'Cut', 'desc', 60, 5000, 'USD', true);
+  const service = new ServiceOffering('00000000-0000-4000-8000-000000000001', 'Cut', 'desc', 60, 5000, 'USD', true);
 
   const bookings = {
     findById: vi.fn(),
@@ -81,8 +82,8 @@ describe('CreateBookingUseCase', () => {
   it('claims slot, charges, publishes event', async () => {
     const { useCase, bookings, events, catalogCache } = makeUseCase();
     const result = await useCase.execute({
-      serviceId: 'svc-1',
-      slotId: 'slot-1',
+      serviceId: '00000000-0000-4000-8000-000000000001',
+      slotId: '00000000-0000-4000-8000-000000000002',
       customerName: 'Ada Lovelace',
       customerEmail: 'ada@example.com',
       idempotencyKey: 'idem-1',
@@ -100,8 +101,8 @@ describe('CreateBookingUseCase', () => {
   it('replays when idempotency key already completed', async () => {
     const existing = Booking.create({
       id: 'existing',
-      serviceId: 'svc-1',
-      slotId: 'slot-1',
+      serviceId: '00000000-0000-4000-8000-000000000001',
+      slotId: '00000000-0000-4000-8000-000000000002',
       customerName: 'Ada',
       customerEmail: 'ada@example.com',
       amountCents: 5000,
@@ -126,8 +127,8 @@ describe('CreateBookingUseCase', () => {
     idempotency.get.mockResolvedValue(null);
 
     const result = await useCase.execute({
-      serviceId: 'svc-1',
-      slotId: 'slot-1',
+      serviceId: '00000000-0000-4000-8000-000000000001',
+      slotId: '00000000-0000-4000-8000-000000000002',
       customerName: 'Ada',
       customerEmail: 'ada@example.com',
       idempotencyKey: 'idem-1',

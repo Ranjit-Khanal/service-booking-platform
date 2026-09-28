@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { describe, expect, it } from 'vitest';
 import { Booking } from '../../src/domain/entities/Booking.js';
 import { withRetry } from '../../src/infrastructure/resilience/retry.js';

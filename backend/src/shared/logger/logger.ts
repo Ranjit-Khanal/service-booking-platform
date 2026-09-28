@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import pino from 'pino';
 import type { Env } from '../../config/env.js';
 

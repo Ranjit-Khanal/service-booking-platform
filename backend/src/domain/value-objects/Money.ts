@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 export type Money = {
   readonly amountCents: number;
   readonly currency: string;

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { createHash, randomUUID } from 'node:crypto';
 import type { BookingRepository } from '../../domain/repositories/BookingRepository.js';
 import type { ServiceRepository } from '../../domain/repositories/ServiceRepository.js';
@@ -225,8 +226,18 @@ export class CreateBookingUseCase {
     if (!input.idempotencyKey?.trim()) {
       throw new ValidationError('Idempotency-Key header is required');
     }
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuid.test(input.serviceId) || !uuid.test(input.slotId)) {
+      throw new ValidationError('serviceId and slotId must be UUIDs');
+    }
+    if (input.idempotencyKey.length > 255) {
+      throw new ValidationError('Idempotency-Key must be at most 255 characters');
+    }
     if (!input.customerName?.trim()) {
       throw new ValidationError('customerName is required');
+    }
+    if (input.customerName.length > 200 || input.customerEmail.length > 320) {
+      throw new ValidationError('customerName or customerEmail is too long');
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.customerEmail)) {
       throw new ValidationError('customerEmail is invalid');

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { BookingRepository } from '../../domain/repositories/BookingRepository.js';
 import type { ServiceRepository } from '../../domain/repositories/ServiceRepository.js';
 import { NotFoundError } from '../../shared/errors/AppError.js';

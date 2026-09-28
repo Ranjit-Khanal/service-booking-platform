@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { CacheStore } from '../../domain/repositories/InfrastructurePorts.js';
 import type { Logger } from '../../shared/logger/logger.js';
 import type { Redis as RedisClient } from 'ioredis';

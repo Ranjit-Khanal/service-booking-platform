@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { loadEnv } from '../config/env.js';
 import { createLogger } from '../shared/logger/logger.js';
 import { FailureSimulator } from '../infrastructure/resilience/FailureSimulator.js';
@@ -11,6 +12,7 @@ import { createPaymentProvider } from '../infrastructure/external-services/Payme
 import { CatalogCache } from '../application/services/CatalogCache.js';
 import { createCacheMetrics } from '../infrastructure/cache/CachePolicy.js';
 import { CreateBookingUseCase } from '../application/use-cases/CreateBookingUseCase.js';
+import { CancelBookingUseCase } from '../application/use-cases/CancelBookingUseCase.js';
 import {
   GetBookingUseCase,
   GetServiceUseCase,
@@ -48,7 +50,10 @@ export async function buildApp() {
 
   const db = createDatabase(env, logger, failures);
   const redisStack = createRedisStack(env, logger, failures);
-  const messaging = await createMessaging(env, logger, failures);
+  // Broker loss → graceful shutdown via SIGTERM; the supervisor restarts the process.
+  const messaging = await createMessaging(env, logger, failures, () => {
+    process.kill(process.pid, 'SIGTERM');
+  });
 
   const bookingRepo = new PostgresBookingRepository(db);
   const serviceRepo = new PostgresServiceRepository(db);
@@ -76,13 +81,19 @@ export async function buildApp() {
     paymentMaxRetries: env.PAYMENT_MAX_RETRIES,
   });
 
+  const cancelBooking = new CancelBookingUseCase({
+    bookings: bookingRepo,
+    catalogCache,
+    logger,
+  });
+
   const listServices = new ListServicesUseCase(serviceRepo, catalogCache);
   const getService = new GetServiceUseCase(serviceRepo, catalogCache);
   const listSlots = new ListSlotsUseCase(serviceRepo, catalogCache);
   const getBooking = new GetBookingUseCase(bookingRepo);
   const listByEmail = new ListBookingsByEmailUseCase(bookingRepo);
 
-  const bookingController = new BookingController(createBooking);
+  const bookingController = new BookingController(createBooking, cancelBooking);
   const catalogController = new CatalogController(
     listServices,
     getService,

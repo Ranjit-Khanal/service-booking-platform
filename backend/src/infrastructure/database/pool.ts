@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import pg from 'pg';
 import type { Env } from '../../config/env.js';
 import type { Logger } from '../../shared/logger/logger.js';

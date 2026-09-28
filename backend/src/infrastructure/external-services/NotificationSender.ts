@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { NotificationSender } from '../../domain/services/EventPublisher.js';
 import type { Logger } from '../../shared/logger/logger.js';
 import type { Db } from '../database/pool.js';

@@ -1,10 +1,28 @@
+# Dependencies and build output
 node_modules/
 dist/
-.env
-.env.local
 coverage/
+*.tsbuildinfo
+
+# Environment — never commit real values; *.example files are templates
+.env
+.env.*
+!.env.example
+
+# Logs
 *.log
+npm-debug.log*
+
+# Keys and certificates
+*.pem
+*.key
+*.crt
+*.p12
+
+# Editors / OS
 .DS_Store
+.idea/
+.vscode/
+
+# Local research notes: contains extracted third-party book text — never publish
 .book-analysis/
-backend/dist/
-frontend/dist/

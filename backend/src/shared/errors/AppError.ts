@@ -1,6 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 export type ErrorCode =
   | 'VALIDATION_ERROR'
   | 'NOT_FOUND'
+  | 'UNAUTHORIZED'
+  | 'INVALID_STATE_TRANSITION'
   | 'CONFLICT'
   | 'SLOT_UNAVAILABLE'
   | 'RATE_LIMITED'
@@ -42,6 +45,18 @@ export class NotFoundError extends AppError {
 export class ConflictError extends AppError {
   constructor(message: string, details?: unknown) {
     super({ code: 'CONFLICT', message, statusCode: 409, details });
+  }
+}
+
+export class UnauthorizedError extends AppError {
+  constructor(message = 'Missing or invalid API key') {
+    super({ code: 'UNAUTHORIZED', message, statusCode: 401 });
+  }
+}
+
+export class InvalidStateTransitionError extends AppError {
+  constructor(message: string, details?: unknown) {
+    super({ code: 'INVALID_STATE_TRANSITION', message, statusCode: 409, details });
   }
 }
 

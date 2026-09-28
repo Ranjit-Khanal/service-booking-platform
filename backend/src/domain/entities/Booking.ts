@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 export type BookingStatus = 'pending_payment' | 'confirmed' | 'cancelled' | 'failed';
 
 export class Booking {

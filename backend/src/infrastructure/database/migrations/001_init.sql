@@ -1,3 +1,4 @@
+-- SPDX-License-Identifier: AGPL-3.0-only
 -- SlotBook schema
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 

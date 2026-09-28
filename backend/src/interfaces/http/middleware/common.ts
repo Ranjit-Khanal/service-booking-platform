@@ -1,8 +1,9 @@
-import { randomUUID } from 'node:crypto';
+// SPDX-License-Identifier: AGPL-3.0-only
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import type { Request, Response, NextFunction } from 'express';
 import type { Logger } from '../../../shared/logger/logger.js';
 import type { RateLimiter } from '../../../domain/repositories/InfrastructurePorts.js';
-import { AppError } from '../../../shared/errors/AppError.js';
+import { AppError, NotFoundError, UnauthorizedError } from '../../../shared/errors/AppError.js';
 
 export function requestContextMiddleware(baseLogger: Logger) {
   return (req: Request, res: Response, next: NextFunction): void => {
@@ -28,12 +29,55 @@ export function requestContextMiddleware(baseLogger: Logger) {
   };
 }
 
+function presentedKey(req: Request, header: string): string | undefined {
+  const auth = req.header('authorization');
+  if (auth?.startsWith('Bearer ')) return auth.slice('Bearer '.length).trim();
+  return req.header(header) ?? undefined;
+}
+
+function matchesAny(candidate: string | undefined, keys: string[]): boolean {
+  if (!candidate) return false;
+  const c = Buffer.from(candidate);
+  // Compare against every key so timing doesn't reveal which one (or how many) matched.
+  let ok = false;
+  for (const key of keys) {
+    const k = Buffer.from(key);
+    if (k.length === c.length && timingSafeEqual(k, c)) ok = true;
+  }
+  return ok;
+}
+
+/**
+ * Service-to-service auth: the integrating application holds an API key.
+ * The booking service does not own end-user identity; the caller is trusted to
+ * pass customer details (name, email) on behalf of its own authenticated users.
+ */
+export function apiKeyAuthMiddleware(opts: { mode: 'api_key' | 'none'; keys: string[] }) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (opts.mode === 'none') return next();
+    if (matchesAny(presentedKey(req, 'x-api-key'), opts.keys)) return next();
+    next(new UnauthorizedError());
+  };
+}
+
+/** Admin routes are disabled (404) unless ADMIN_API_KEY is configured. */
+export function adminAuthMiddleware(adminKey: string | undefined) {
+  return (req: Request, _res: Response, next: NextFunction): void => {
+    if (!adminKey) return next(new NotFoundError('Not found'));
+    if (matchesAny(req.header('x-admin-key') ?? undefined, [adminKey])) return next();
+    next(new UnauthorizedError('Missing or invalid admin key'));
+  };
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
 export function createRateLimitMiddleware(
   rateLimiter: RateLimiter,
-  opts: { windowMs: number; max: number },
+  opts: { windowMs: number; max: number; logger: Logger },
 ) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
+      // With `trust proxy` configured this is the client address from X-Forwarded-For.
       const key = req.ip ?? 'unknown';
       const result = await rateLimiter.consume(key, opts.max, opts.windowMs);
       res.setHeader('X-RateLimit-Limit', String(opts.max));
@@ -47,7 +91,13 @@ export function createRateLimitMiddleware(
       }
       next();
     } catch (error) {
-      // Fail open on Redis outage for reads? We fail closed for safety on booking paths.
+      // Reads fail open so catalog/booking lookups survive a Redis outage;
+      // mutations fail closed (they also need Redis for idempotency anyway).
+      if (SAFE_METHODS.has(req.method)) {
+        opts.logger.warn({ err: error }, 'Rate limiter unavailable; allowing read request');
+        next();
+        return;
+      }
       next(error);
     }
   };

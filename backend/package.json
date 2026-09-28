@@ -1,7 +1,7 @@
 {
   "name": "slotbook-api",
   "version": "1.0.0",
-  "description": "",
+  "description": "Self-hostable service-booking backend (Node.js/TypeScript, PostgreSQL, Redis, RabbitMQ)",
   "main": "index.js",
   "directories": {
     "test": "tests"
@@ -14,6 +14,7 @@
     "start:worker": "node dist/worker.js",
     "migrate": "tsx src/infrastructure/database/migrate.ts",
     "seed": "tsx src/infrastructure/database/seed.ts",
+    "seed:reset": "tsx src/infrastructure/database/seed.ts --reset",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:unit": "vitest run tests/unit",
@@ -24,7 +25,7 @@
   },
   "keywords": [],
   "author": "",
-  "license": "ISC",
+  "license": "AGPL-3.0-only",
   "type": "module",
   "engines": {
     "node": ">=20"

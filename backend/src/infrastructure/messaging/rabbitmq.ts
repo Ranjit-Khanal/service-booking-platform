@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import amqp, { type Channel, type ChannelModel } from 'amqplib';
 import type { Env } from '../../config/env.js';
 import type { DomainEvent, EventPublisher } from '../../domain/services/EventPublisher.js';
@@ -25,9 +26,30 @@ export async function createMessaging(
   >,
   logger: Logger,
   failures: FailureSimulator,
+  /**
+   * Called once if the broker connection or channel closes unexpectedly.
+   * No in-process reconnect: the caller shuts down and the supervisor
+   * (Compose `restart: unless-stopped`, Kubernetes) starts a fresh process.
+   */
+  onConnectionLost?: (reason: unknown) => void,
 ): Promise<Messaging> {
   const connection = await amqp.connect(env.RABBITMQ_URL);
   const channel = await connection.createChannel();
+
+  let closing = false;
+  let lostReported = false;
+  const lost = (reason: unknown) => {
+    if (closing || lostReported) return;
+    lostReported = true;
+    logger.error({ err: reason }, 'RabbitMQ connection lost');
+    onConnectionLost?.(reason);
+  };
+  // Without these listeners an 'error' event is unhandled, and after a broker restart the
+  // process keeps running with a dead channel (every publish then fails).
+  connection.on('error', (err: unknown) => logger.error({ err }, 'RabbitMQ connection error'));
+  connection.on('close', () => lost(new Error('RabbitMQ connection closed')));
+  channel.on('error', (err: unknown) => logger.error({ err }, 'RabbitMQ channel error'));
+  channel.on('close', () => lost(new Error('RabbitMQ channel closed')));
 
   const setupTopology = async (): Promise<void> => {
     await channel.assertExchange(env.BOOKING_EVENTS_EXCHANGE, 'topic', { durable: true });
@@ -83,8 +105,9 @@ export async function createMessaging(
     connection,
     setupTopology,
     close: async () => {
-      await channel.close();
-      await connection.close();
+      closing = true;
+      await channel.close().catch(() => undefined);
+      await connection.close().catch(() => undefined);
       logger.info('RabbitMQ connection closed');
     },
   };

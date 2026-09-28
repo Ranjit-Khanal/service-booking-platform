@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { CacheStore } from '../../domain/repositories/InfrastructurePorts.js';
 import type { ServiceOffering, TimeSlot } from '../../domain/entities/ServiceOffering.js';
 import { ServiceOffering as ServiceEntity, TimeSlot as TimeSlotEntity } from '../../domain/entities/ServiceOffering.js';

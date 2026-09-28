@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { PoolClient } from 'pg';
 import type { Booking } from '../../domain/entities/Booking.js';
 import { Booking as BookingEntity } from '../../domain/entities/Booking.js';
-import type { BookingRepository } from '../../domain/repositories/BookingRepository.js';
+import type {
+  BookingRepository,
+  CancelOutcome,
+} from '../../domain/repositories/BookingRepository.js';
 import type { Db } from '../database/pool.js';
 
 type BookingRow = {
@@ -93,6 +97,46 @@ export class PostgresBookingRepository implements BookingRepository {
        WHERE id = $1`,
       [booking.id, booking.status, booking.paymentReference, booking.updatedAt.toISOString()],
     );
+  }
+
+  /**
+   * BEGIN;
+   *   SELECT booking FOR UPDATE            -- concurrent cancels queue here
+   *   (entity checks the transition)
+   *   UPDATE booking → cancelled
+   *   UPDATE slot → open, version+1        -- same tx: no "cancelled but slot still booked" window
+   * COMMIT;
+   */
+  async cancel(id: string): Promise<CancelOutcome> {
+    return this.db.withTransaction(async (client) => {
+      const locked = await client.query<BookingRow>(
+        'SELECT * FROM bookings WHERE id = $1 FOR UPDATE',
+        [id],
+      );
+      const row = locked.rows[0];
+      if (!row) return { outcome: 'not_found' };
+
+      const booking = mapRow(row);
+      if (booking.status === 'cancelled') return { outcome: 'already_cancelled', booking };
+      // pending_payment belongs to an in-flight create request; cancelling it here would
+      // race with that request's confirm/fail write. Only settled bookings are cancellable.
+      if (booking.status !== 'confirmed') return { outcome: 'invalid_state', booking };
+
+      booking.cancel();
+      await client.query(
+        `UPDATE bookings SET status = $2, updated_at = $3 WHERE id = $1 AND status = 'confirmed'`,
+        [booking.id, booking.status, booking.updatedAt.toISOString()],
+      );
+      const slot = await client.query<{ starts_at: Date }>(
+        `UPDATE time_slots
+         SET status = 'open', version = version + 1
+         WHERE id = $1 AND status = 'booked'
+         RETURNING starts_at`,
+        [booking.slotId],
+      );
+      const startsAt = slot.rows[0]?.starts_at ?? null;
+      return { outcome: 'cancelled', booking, slotStartsAt: startsAt };
+    });
   }
 }
 

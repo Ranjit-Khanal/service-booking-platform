@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Redis as RedisClient } from 'ioredis';
 import { Redis } from 'ioredis';
 import type { Env } from '../../config/env.js';

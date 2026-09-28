@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import type { Server } from 'node:http';
 import type { Logger } from '../shared/logger/logger.js';
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 import { buildApp } from './composition/buildApp.js';
 import { registerGracefulShutdown } from './shared/shutdown.js';
 

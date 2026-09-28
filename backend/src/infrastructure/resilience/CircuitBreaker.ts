@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-only
 export type CircuitState = 'closed' | 'open' | 'half_open';
 
 export type CircuitBreakerOptions = {
