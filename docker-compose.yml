@@ -1,0 +1,197 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: slotbook
+      POSTGRES_PASSWORD: slotbook
+      POSTGRES_DB: slotbook
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slotbook -d slotbook"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: slotbook
+      RABBITMQ_DEFAULT_PASS: slotbook
+    ports:
+      - "5673:5672"
+      - "15673:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: ./backend
+    command: ["npx", "tsx", "src/infrastructure/database/migrate.ts"]
+    environment:
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: migrate
+      LOG_LEVEL: info
+      PAYMENT_PROVIDER: mock
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    build:
+      context: ./backend
+    command: ["npx", "tsx", "src/infrastructure/database/seed.ts"]
+    environment:
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      REDIS_URL: redis://redis:6379
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: seed
+      LOG_LEVEL: info
+      PAYMENT_PROVIDER: mock
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api1:
+    build:
+      context: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: api-1
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      DB_POOL_MAX: "10"
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: "slotbook:"
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      RATE_LIMIT_WINDOW_MS: "60000"
+      RATE_LIMIT_MAX: "120"
+      PAYMENT_PROVIDER: mock
+      LOG_LEVEL: info
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    expose:
+      - "3000"
+
+  api2:
+    build:
+      context: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: api-2
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      DB_POOL_MAX: "10"
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: "slotbook:"
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      RATE_LIMIT_WINDOW_MS: "60000"
+      RATE_LIMIT_MAX: "120"
+      PAYMENT_PROVIDER: mock
+      LOG_LEVEL: info
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    expose:
+      - "3000"
+
+  api3:
+    build:
+      context: ./backend
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: api-3
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      DB_POOL_MAX: "10"
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: "slotbook:"
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      RATE_LIMIT_WINDOW_MS: "60000"
+      RATE_LIMIT_MAX: "120"
+      PAYMENT_PROVIDER: mock
+      LOG_LEVEL: info
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    expose:
+      - "3000"
+
+  worker:
+    build:
+      context: ./backend
+    command: ["node", "dist/worker.js"]
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+      INSTANCE_ID: worker-1
+      DATABASE_URL: postgres://slotbook:slotbook@postgres:5432/slotbook
+      DB_POOL_MAX: "5"
+      REDIS_URL: redis://redis:6379
+      REDIS_KEY_PREFIX: "slotbook:"
+      RABBITMQ_URL: amqp://slotbook:slotbook@rabbitmq:5672
+      PAYMENT_PROVIDER: mock
+      LOG_LEVEL: info
+    depends_on:
+      seed:
+        condition: service_completed_successfully
+      rabbitmq:
+        condition: service_healthy
+
+  haproxy:
+    image: haproxy:2.9-alpine
+    volumes:
+      - ./docker/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api1
+      - api2
+      - api3
+
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_BASE_URL: http://localhost:8080
+    ports:
+      - "5173:80"
+    depends_on:
+      - haproxy
+
+volumes:
+  pgdata:
